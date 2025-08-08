@@ -21,5 +21,5 @@ RUN pip install -r requirements.txt
 # Copy application code
 COPY . .
 
-# Command to run Streamlit app
-CMD ["streamlit", "run", "app.py", "--server.port=8080", "--server.address=0.0.0.0"]
+# Command to run Streamlit app with CORS disabled and temporary file support
+CMD ["streamlit", "run", "app.py", "--server.port=8080", "--server.address=0.0.0.0", "--server.enableCORS=false", "--browser.serverAddress=0.0.0.0"]

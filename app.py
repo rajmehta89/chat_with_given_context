@@ -2,8 +2,8 @@ from dotenv import load_dotenv
 import os
 import streamlit as st
 import cohere
-
-# Updated imports per langchain v0.2+ (avoid deprecated imports)
+import shutil
+import uuid
 from langchain.document_loaders import PyPDFLoader
 from langchain.text_splitter import CharacterTextSplitter
 from langchain_community.vectorstores import Chroma
@@ -21,16 +21,6 @@ if not cohere_api_key:
 co = cohere.Client(cohere_api_key)
 
 st.set_page_config(page_title="PDF Q&A with Cohere", layout="wide")
-print("Loaded COHERE_API_KEY:", cohere_api_key)  # Debug print, remove in production
-
-@st.cache_data(show_spinner=False)
-def load_pdf_chunks(pdf_path):
-    """Load PDF and split into chunks."""
-    loader = PyPDFLoader(pdf_path)
-    pages = loader.load()
-    splitter = CharacterTextSplitter(chunk_size=500, chunk_overlap=50)
-    chunks = splitter.split_documents(pages)
-    return chunks
 
 class CohereEmbeddings:
     """Custom Cohere embeddings wrapper compatible with LangChain-like interface."""
@@ -47,10 +37,63 @@ class CohereEmbeddings:
         res = co.embed(texts=[text], model="embed-english-v2.0")
         return res.embeddings[0]
 
+def get_user_session_id():
+    """Generate or retrieve a unique session ID for the user."""
+    if 'session_id' not in st.session_state:
+        st.session_state.session_id = str(uuid.uuid4())
+    return st.session_state.session_id
+
+def get_user_temp_dir():
+    """Create and return user-specific temporary directory."""
+    session_id = get_user_session_id()
+    user_temp_dir = os.path.join("/tmp", f"user_{session_id}")
+
+    # Create directory if it doesn't exist
+    os.makedirs(user_temp_dir, exist_ok=True)
+    return user_temp_dir
+
+def cleanup_user_temp_dir():
+    """Clean up all files in user's temporary directory."""
+    user_temp_dir = get_user_temp_dir()
+    if os.path.exists(user_temp_dir):
+        # Remove all files in the directory
+        for filename in os.listdir(user_temp_dir):
+            file_path = os.path.join(user_temp_dir, filename)
+            try:
+                if os.path.isfile(file_path):
+                    os.remove(file_path)
+                elif os.path.isdir(file_path):
+                    # Force remove directory even if files are locked
+                    shutil.rmtree(file_path, ignore_errors=True)
+            except Exception as e:
+                # Silently ignore file locking errors
+                pass
+
+def load_pdf_chunks(pdf_path):
+    """Load PDF and split into chunks."""
+    try:
+        loader = PyPDFLoader(pdf_path)
+        pages = loader.load()
+        splitter = CharacterTextSplitter(chunk_size=500, chunk_overlap=50)
+        chunks = splitter.split_documents(pages)
+        return chunks
+    except Exception as e:
+        st.error(f"Error loading PDF: {e}")
+        return []
+
 def get_vectorstore(chunks):
+    """Create a new Chroma vector store from document chunks."""
     embeddings = CohereEmbeddings()
-    vectorstore = Chroma.from_documents(chunks, embeddings)
-    return vectorstore
+    session_id = get_user_session_id()
+    # Create unique collection name for this user session
+    collection_name = f"pdf_collection_{session_id}_{uuid.uuid4().hex[:8]}"
+
+    # Create in-memory vector store to avoid file locking issues
+    return Chroma.from_documents(
+        chunks,
+        embeddings,
+        collection_name=collection_name
+    )
 
 def answer_query(question, relevant_docs):
     """
@@ -58,12 +101,19 @@ def answer_query(question, relevant_docs):
     """
     context = "\n\n".join([doc.page_content for doc in relevant_docs])
 
-    prompt = f"""Answer the following question using only the provided context.
+    prompt = f"""You are a helpful PDF assistant. Answer the question based on the provided context from the uploaded PDF.
 
-Context:
+Context from PDF:
 {context}
 
 Question: {question}
+
+Instructions:
+- If the context contains relevant information, provide a helpful answer
+- If the context doesn't contain the specific information asked about, explain what the PDF actually contains instead
+- If the PDF contains Lorem Ipsum or placeholder text, mention that and suggest uploading a real document
+- Be conversational and helpful, not overly rigid
+
 Answer:"""
 
     try:
@@ -71,7 +121,7 @@ Answer:"""
             model="command-xlarge-nightly",
             message=prompt,
             max_tokens=500,
-            temperature=0
+            temperature=0.3
         )
         return response.text.strip()
     except Exception as e:
@@ -87,33 +137,82 @@ def main():
         """
     )
 
+    # Add a button to clear previous uploads
+    if st.button("🗑️ Clear Previous Files"):
+        cleanup_user_temp_dir()
+        # Clear ALL session state related to files and vectorstore
+        keys_to_remove = ['vectorstore', 'current_file', 'processed_file'] + \
+                         [k for k in st.session_state.keys() if k.startswith(('pdf_', 'chunks_'))]
+
+        for key in keys_to_remove:
+            if key in st.session_state:
+                del st.session_state[key]
+
+        st.success("Previous files cleared!")
+        st.rerun()
+
     uploaded_file = st.file_uploader("Upload your PDF file", type=["pdf"])
 
     if uploaded_file is not None:
-        # Save uploaded PDF temporarily
-        with open("temp_uploaded.pdf", "wb") as f:
+        # Check if this is a new file
+        file_changed = ('current_file' not in st.session_state or
+                        st.session_state.current_file != uploaded_file.name)
+
+        if file_changed:
+            # New file uploaded, clean up previous files
+            cleanup_user_temp_dir()
+            st.session_state.current_file = uploaded_file.name
+
+            # Force remove old vectorstore from session state
+            if 'vectorstore' in st.session_state:
+                del st.session_state.vectorstore
+
+            # Clear any other cached data
+            for key in list(st.session_state.keys()):
+                if key.startswith('pdf_') or key.startswith('chunks_'):
+                    del st.session_state[key]
+
+        # Save uploaded PDF to user-specific temporary directory
+        user_temp_dir = get_user_temp_dir()
+        temp_file_path = os.path.join(user_temp_dir, uploaded_file.name)
+
+        with open(temp_file_path, "wb") as f:
             f.write(uploaded_file.getbuffer())
-        st.success("PDF uploaded successfully!")
+        st.success(f"PDF uploaded successfully: {uploaded_file.name}")
 
-        # Load and chunk PDF
-        chunks = load_pdf_chunks("temp_uploaded.pdf")
+        # Load and process PDF only if not already done for THIS file
+        if ('vectorstore' not in st.session_state or
+                st.session_state.get('processed_file') != uploaded_file.name):
 
-        # Create vectorstore from chunks (embedding + indexing)
-        vectorstore = get_vectorstore(chunks)
+            with st.spinner("Processing PDF..."):
+                # Load and chunk PDF
+                chunks = load_pdf_chunks(temp_file_path)
+
+                if chunks:
+                    # Create vector store and store in session state
+                    st.session_state.vectorstore = get_vectorstore(chunks)
+                    st.session_state.processed_file = uploaded_file.name
+                    st.success("PDF processed and ready for questions!")
+                else:
+                    st.error("Failed to process the PDF. Please check the file or try another.")
+                    return
 
         # Input question from user
-        question = st.text_input("Ask a question based on the PDF content:")
+        if 'vectorstore' in st.session_state:
+            question = st.text_input("Ask a question based on the PDF content:")
 
-        if st.button("Get Answer") and question.strip() != "":
-            with st.spinner("Searching and generating answer..."):
-                # Find relevant chunks by semantic similarity
-                relevant_docs = vectorstore.similarity_search(question, k=3)
+            if st.button("Get Answer") and question.strip() != "":
+                with st.spinner("Searching and generating answer..."):
+                    # Find relevant chunks by semantic similarity
+                    relevant_docs = st.session_state.vectorstore.similarity_search(question, k=3)
 
-                # Get answer using Cohere chat API
-                answer = answer_query(question, relevant_docs)
+                    # Get answer using Cohere chat API
+                    answer = answer_query(question, relevant_docs)
 
-            st.markdown("### Answer:")
-            st.write(answer)
+                st.markdown("### Answer:")
+                st.write(answer)
+
+
 
 if __name__ == "__main__":
     main()
