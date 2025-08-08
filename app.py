@@ -3,9 +3,10 @@ import os
 import streamlit as st
 import cohere
 
+# Updated imports per langchain v0.2+ (avoid deprecated imports)
 from langchain.document_loaders import PyPDFLoader
 from langchain.text_splitter import CharacterTextSplitter
-from langchain.vectorstores import Chroma
+from langchain_community.vectorstores import Chroma  # Updated import
 from langchain.embeddings.base import Embeddings  # for custom embeddings wrapper
 
 # Load environment variables from .env file
