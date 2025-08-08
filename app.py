@@ -74,7 +74,7 @@ Answer:"""
         response = co.chat(
             model="command-xlarge-nightly",
             message=prompt,
-            max_tokens=256,
+            max_tokens=500,
             temperature=0
         )
         return response.text.strip()
