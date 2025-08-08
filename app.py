@@ -3,32 +3,38 @@ import os
 import streamlit as st
 import cohere
 
-from langchain.embeddings import Embeddings
-from langchain_community.vectorstores import Chroma
+# Updated imports per langchain v0.2+ (avoid deprecated imports)
 from langchain.document_loaders import PyPDFLoader
 from langchain.text_splitter import CharacterTextSplitter
+from langchain_community.vectorstores import Chroma
 
 # Load environment variables from .env file
 load_dotenv()
 
+# Fetch Cohere API key from environment
 cohere_api_key = os.getenv("COHERE_API_KEY")
 if not cohere_api_key:
     st.error("COHERE_API_KEY environment variable not found. Please set it before running the app.")
     st.stop()
 
+# Initialize Cohere client
 co = cohere.Client(cohere_api_key)
 
 st.set_page_config(page_title="PDF Q&A with Cohere", layout="wide")
+print("Loaded COHERE_API_KEY:", cohere_api_key)  # Debug print, remove in production
 
 @st.cache_data(show_spinner=False)
 def load_pdf_chunks(pdf_path):
+    """Load PDF and split into chunks."""
     loader = PyPDFLoader(pdf_path)
     pages = loader.load()
     splitter = CharacterTextSplitter(chunk_size=500, chunk_overlap=50)
     chunks = splitter.split_documents(pages)
     return chunks
 
-class CohereEmbeddings(Embeddings):
+class CohereEmbeddings:
+    """Custom Cohere embeddings wrapper compatible with LangChain-like interface."""
+
     def embed_documents(self, texts):
         try:
             response = co.embed(texts=texts, model="embed-english-v2.0")
@@ -47,6 +53,9 @@ def get_vectorstore(chunks):
     return vectorstore
 
 def answer_query(question, relevant_docs):
+    """
+    Use retrieved chunks as context and get answer from Cohere chat model.
+    """
     context = "\n\n".join([doc.page_content for doc in relevant_docs])
 
     prompt = f"""Answer the following question using only the provided context.
@@ -81,19 +90,26 @@ def main():
     uploaded_file = st.file_uploader("Upload your PDF file", type=["pdf"])
 
     if uploaded_file is not None:
+        # Save uploaded PDF temporarily
         with open("temp_uploaded.pdf", "wb") as f:
             f.write(uploaded_file.getbuffer())
         st.success("PDF uploaded successfully!")
 
+        # Load and chunk PDF
         chunks = load_pdf_chunks("temp_uploaded.pdf")
 
+        # Create vectorstore from chunks (embedding + indexing)
         vectorstore = get_vectorstore(chunks)
 
+        # Input question from user
         question = st.text_input("Ask a question based on the PDF content:")
 
         if st.button("Get Answer") and question.strip() != "":
             with st.spinner("Searching and generating answer..."):
+                # Find relevant chunks by semantic similarity
                 relevant_docs = vectorstore.similarity_search(question, k=3)
+
+                # Get answer using Cohere chat API
                 answer = answer_query(question, relevant_docs)
 
             st.markdown("### Answer:")
