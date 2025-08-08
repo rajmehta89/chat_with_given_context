@@ -101,18 +101,3 @@ streamlit run app.py
 - [Streamlit Documentation](https://docs.streamlit.io/)
 
 ---
-
-## License
-
-This project is open source and available under the MIT License.
-
----
-
-
-
-
-
-
-
-5. *(Optional but recommended)* Create and activate a Python virtual environment:
-
